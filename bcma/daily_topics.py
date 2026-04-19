@@ -293,12 +293,15 @@ def _score_one(
     """
     dummy_rule = RuleResult(allowed=True, reason="daily_topics pre-curated", hits=[])
     model_cfg = cfg.select_model()
+    # Step 5 不允许回落启发式：LLM 失败时 raise，由 _score_candidates_concurrently
+    # 在 as_completed 循环里丢弃，避免 SHA256 伪随机 R4 触发 veto 污染 Top K。
     score = compute_4r_score_with_model(
         candidate,
         dummy_rule,
         cfg.scoring,
         model_cfg,
         brand_rules_prompt=brand_rules_prompt,
+        heuristic_fallback=False,
     )
     return candidate, score
 
@@ -392,11 +395,11 @@ def _write_top_k(
     scored: List[Tuple[CandidateTopic, FourRScore]],
     top_k: int,
     existing_topic_names: Set[str],
-) -> Tuple[List[Dict[str, Any]], int]:
+) -> Tuple[List[Dict[str, Any]], int, int]:
     """按总分降序取 Top K 写入 TopicSelection，跳过已存在条目。
 
     Returns:
-        (written_records, skipped_due_to_dedup)
+        (written_records, skipped_due_to_dedup, write_failed_count)
     """
     # 仅保留打分成功且有决策结果的条目
     valid: List[Tuple[CandidateTopic, FourRScore]] = [
@@ -413,6 +416,7 @@ def _write_top_k(
 
     created_records: List[Dict[str, Any]] = []
     skipped = 0
+    write_failed = 0
     now_ms = now_ts_ms()
 
     for candidate, score in selected:
@@ -466,7 +470,9 @@ def _write_top_k(
         try:
             resp = add_single(app_token, topic_tbl, fields)
         except Exception as e:
-            logger.warning("写入 TopicSelection 失败 topic='%s': %s", topic_text, e)
+            # 升级为 ERROR 并计数；上层要把 write_failed 暴露到卡片/返回摘要里。
+            logger.error("写入 TopicSelection 失败 topic='%s': %s", topic_text, e)
+            write_failed += 1
             continue
 
         record = None
@@ -480,7 +486,7 @@ def _write_top_k(
             # 本次写入成功的 topic 名加入集合，防止同一批内重名重复写入
             existing_topic_names.add(topic_text)
 
-    return created_records, skipped
+    return created_records, skipped, write_failed
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +498,7 @@ def run_brand_daily_selection(
     brand: str,
     top_k: Optional[int] = None,
     date: Optional[str] = None,
+    force: bool = False,
 ) -> Dict[str, Any]:
     """第五步入口：每日精选话题 → 品牌 4R 打分 → Top K 写入 TopicSelection。
 
@@ -500,6 +507,9 @@ def run_brand_daily_selection(
         brand: 品牌名（必须与 BrandTopicRules 表中记录一致，否则会使用通用 prompt）
         top_k: Top K 数量；None 时使用 config.daily_topics.top_k（默认 5）
         date: 指定日期 'YYYY-MM-DD'；None 时按北京时间当日
+        force: 跳过 TopicSelection 去重，强制重写。默认 False。
+            当回溯窗口内的同名话题已写入过时，常规路径会跳过；force=True
+            可用于手动重跑、调试或修正 4R 打分异常结果。
 
     Returns:
         结构化摘要 JSON
@@ -592,11 +602,15 @@ def run_brand_daily_selection(
     # 4) 并发 4R 打分
     scored = _score_candidates_concurrently(cfg, candidates, brand_rules_prompt)
 
-    # 5) 去重：查 TopicSelection 当日该品牌已存在话题名
-    existing = _load_existing_topic_names_today(cfg, brand, dedup_start_ms, dedup_end_ms)
+    # 5) 去重：查 TopicSelection 当日该品牌已存在话题名；force=True 时跳过
+    if force:
+        logger.info("force=True，跳过 TopicSelection 去重检查")
+        existing: Set[str] = set()
+    else:
+        existing = _load_existing_topic_names_today(cfg, brand, dedup_start_ms, dedup_end_ms)
 
     # 6) 写入 Top K
-    written, skipped = _write_top_k(cfg, brand, scored, effective_top_k, existing)
+    written, skipped, write_failed = _write_top_k(cfg, brand, scored, effective_top_k, existing)
 
     # 构建入选话题摘要（供卡片展示）
     selected_topics: List[Dict[str, Any]] = []
@@ -619,6 +633,7 @@ def run_brand_daily_selection(
         "top_k": effective_top_k,
         "written_count": len(written),
         "skipped_dedup": skipped,
+        "write_failed": write_failed,
         "selected_topics": selected_topics,
         "selected_record_ids": [r.get("record_id") for r in written if isinstance(r, dict)],
     }

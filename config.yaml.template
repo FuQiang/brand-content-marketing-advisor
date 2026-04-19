@@ -160,7 +160,8 @@ downstream:
     - "小红书"
     - "抖音"
   max_products_per_topic: 2
-  brand_topic_lookback_hours: 48
+  # 10 天 = 240 小时，与 daily_topics.lookback_days 对齐，避免 Step5 写完后过 48h Step6 读不到
+  brand_topic_lookback_hours: 240
   brand_top_k_assets: 5
 
 # 第五步：每日精选话题筛选数据源（跨 base 读取）

@@ -222,6 +222,13 @@ def main() -> None:
         required=False,
         help="指定日期 YYYY-MM-DD，默认按北京时间当日",
     )
+    p_s5.add_argument(
+        "--force",
+        dest="force",
+        action="store_true",
+        default=False,
+        help="跳过 TopicSelection 去重，强制重写（用于手动重跑或修正 4R 打分）",
+    )
     _add_schema_check_args(p_s5)
 
     # ── Step 6: generate_brand_content ──
@@ -241,6 +248,13 @@ def main() -> None:
     p_all.add_argument(
         "--top-k", dest="top_k", type=int, required=False,
         help="Step 5 Top K 数量，默认读 config",
+    )
+    p_all.add_argument(
+        "--force",
+        dest="force",
+        action="store_true",
+        default=False,
+        help="Step 5 跳过 TopicSelection 去重，强制重写",
     )
     _add_schema_check_args(p_all)
 
@@ -320,6 +334,7 @@ def main() -> None:
             brand=args.brand,
             top_k=getattr(args, "top_k", None),
             date=getattr(args, "date", None),
+            force=getattr(args, "force", False),
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         send_step_card_to_current_user(5, "select_topic", args.brand, result)
@@ -403,7 +418,9 @@ def main() -> None:
         if tx_ok:
             result5 = _run_step(
                 5, "select_topic", run_brand_daily_selection,
-                cfg, brand=brand, top_k=getattr(args, "top_k", None),
+                cfg, brand=brand,
+                top_k=getattr(args, "top_k", None),
+                force=getattr(args, "force", False),
             )
         else:
             logger.warning("跳过 Step 5: Step 1-4 事务失败已回滚")

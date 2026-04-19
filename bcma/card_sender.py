@@ -217,17 +217,18 @@ def _build_step_card(step: int, step_name: str, brand: str, result: Dict[str, An
     
     elif step == 5:
         # Step 5: 展示话题筛选结果
+        write_failed = int(result.get("write_failed", 0))
+        stat_line = (
+            f"**候选:** {result.get('daily_topics_total', 0)} → "
+            f"**评分:** {result.get('scored_count', 0)} → "
+            f"**入选:** {result.get('written_count', 0)}　"
+            f"**去重跳过:** {result.get('skipped_dedup', 0)}"
+        )
+        if write_failed:
+            stat_line += f"　⚠️ **写入失败:** {write_failed}"
         elements.append({
             "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": (
-                    f"**候选:** {result.get('daily_topics_total', 0)} → "
-                    f"**评分:** {result.get('scored_count', 0)} → "
-                    f"**入选:** {result.get('written_count', 0)}　"
-                    f"**去重跳过:** {result.get('skipped_dedup', 0)}"
-                )
-            }
+            "text": {"tag": "lark_md", "content": stat_line}
         })
         # 展示精选话题列表
         topics = result.get("selected_topics", [])
@@ -286,7 +287,31 @@ def _build_step_card(step: int, step_name: str, brand: str, result: Dict[str, An
                 "content": f"**AI 视频:** {result.get('asset_video_uploaded', 0)}"
             }
         })
-    
+        # 暴露封面/视频未生成的根因（dreamina CLI 缺失/产品图缺失/生成失败 …）
+        skip_reasons = result.get("asset_skip_reasons") or []
+        if skip_reasons:
+            elements.append({"tag": "hr"})
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**⚠️ 跳过原因 ({len(skip_reasons)} 条)**"
+                }
+            })
+            for reason in skip_reasons[:5]:
+                elements.append({
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"• {reason}"}
+                })
+            if len(skip_reasons) > 5:
+                elements.append({
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"…还有 {len(skip_reasons) - 5} 条，详见运行日志"
+                    }
+                })
+
     # 添加下一步提示
     elements.append({"tag": "hr"})
     next_steps = {

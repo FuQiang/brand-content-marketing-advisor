@@ -100,7 +100,8 @@ def _load_recent_topics_for_brand(
             continue
         fields = item.get("fields") or {}
 
-        created_ms = int(get_number_field(fields, f_cfg.get("created_at", "生成时间"), default=0.0))
+        # 注意: 默认名对齐 topic_selection.created_at = "入库时间"
+        created_ms = int(get_number_field(fields, f_cfg.get("created_at", "入库时间"), default=0.0))
         if created_ms and created_ms < lower_bound:
             continue
 
@@ -111,8 +112,8 @@ def _load_recent_topics_for_brand(
         brand_field_name = f_cfg.get("brand")
         if brand_field_name:
             brand_value = get_text_field(fields, brand_field_name, "")
-            if brand_value and (brand not in brand_value):
-                # 品牌字段存在且与当前品牌不匹配，则跳过
+            # 精确等值匹配（忽略首尾空格/大小写）；子串匹配会误召"双汇肠" vs "双汇"
+            if brand_value and brand_value.strip().lower() != brand.strip().lower():
                 continue
 
         persona = get_text_field(fields, f_cfg["audience"], "") or None
@@ -607,7 +608,8 @@ def run_brand_content_pipeline(
     if not brand:
         raise ValueError("brand 不能为空")
 
-    lookback_hours = int(cfg.downstream.get("brand_topic_lookback_hours", 48)) or 48
+    # 默认 240h (10 天) 对齐 daily_topics.lookback_days，避免与 Step 5 窗口错位
+    lookback_hours = int(cfg.downstream.get("brand_topic_lookback_hours", 240)) or 240
     top_k = int(cfg.downstream.get("brand_top_k_assets", 5)) or 5
 
     # 0) 先清理 Products 表中“所有记录均为空”的非核心字段

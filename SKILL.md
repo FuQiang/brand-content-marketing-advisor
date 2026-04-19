@@ -143,10 +143,11 @@ version: v5.9.3
   - 使用内置 `_TOPIC_RULES_SKELETON` 骨架，由 LLM 基于 Brand 表 + 品牌人群表内容填充所有 `<<>>` 槽位。生成结果经严格校验，通过后 upsert 写入 `BrandTopicRules` 表。
 
 - **Step 5: 每日精选话题筛选（select_topic）**
-  - 跨 base 从外部「每日精选话题」表（`daily_topics.app_token` / `table_id` / `view_id`）读取**北京时间当日**的候选话题；
+  - 跨 base 从外部「每日精选话题」表（`daily_topics.app_token` / `table_id` / `view_id`）读取**北京时间回溯窗口**内的候选话题（窗口长度由 `daily_topics.lookback_days` 控制，默认 10 天含锚定日，CLI `--date` 覆盖锚定日）；
+  - **热度预筛**：按候选 `raw_text` 中「今日热度」字段降序取 Top `scoring_pool_size` 条（默认 `max(top_k × 3, 15)`）进入 LLM 打分，避免全量调用；
   - 并发调用 4R 打分，使用 `BrandTopicRules` 中 Step 4 生成的品牌专属 prompt（经 `extract_scoring_sections` 截断后的三段）作为评分依据；
   - 按总分 + R4 tie-break 降序取 Top K（默认 5，可配置/可 CLI 覆盖），写入 `TopicSelection` 表并打上「适用品牌」字段；
-  - 去重：按 (当日, 品牌, 话题名称) 三元组跳过已存在条目，保证同一天多次运行幂等；
+  - 去重：按 (回溯窗口, 品牌, 话题名称) 三元组跳过已存在条目（v5.9.0 起去重窗口与候选窗口对齐,不再仅查当日），保证同窗口内多次运行幂等；
   - **本步骤不再触碰文案/产品匹配/封面/视频**，这些全部交给第六步 `generate_brand_content`。
 
 - **品牌内容矩阵与 Top K 视觉资产（generate_brand_content，第六步）**
@@ -304,7 +305,7 @@ python3 user_skills/brand-content-marketing-advisor/main.py init_topic_rules --b
 
 ### Step 5. 每日精选话题筛选（select_topic）
 
-跨 base 从「每日精选话题」表读取**北京时间当日**候选话题，使用 `BrandTopicRules` 中该品牌的 4R prompt 打分，按总分降序取 Top K 写入 `TopicSelection` 表。**本步骤不生成任何文案/封面/视频**，只负责筛选。
+跨 base 从「每日精选话题」表读取**北京时间回溯窗口**内（由 `daily_topics.lookback_days` 控制，默认 **10 天，含锚定日**）的候选话题，按热度预筛后使用 `BrandTopicRules` 中该品牌的 4R prompt 打分，按总分降序取 Top K 写入 `TopicSelection` 表。**本步骤不生成任何文案/封面/视频**，只负责筛选。
 
 **前置条件：** 配置 `daily_topics` 段并已跑过 Step 1~4（保证 `BrandTopicRules` 中存在该品牌的 4R prompt，否则会回落通用 prompt 并打 warning）。
 
@@ -316,38 +317,43 @@ python3 user_skills/brand-content-marketing-advisor/main.py select_topic --brand
 
 - `--brand`：必填，品牌名称（须与 `BrandTopicRules` 中记录一致）。
 - `--top-k`：可选，Top K 数量；默认读 `daily_topics.top_k`（默认 5）。
-- `--date`：可选，指定日期 `YYYY-MM-DD`；默认按北京时间当日。
+- `--date`：可选，锚定日期 `YYYY-MM-DD`（窗口截止日，含）；实际回溯窗口为 `[锚定日 − (lookback_days − 1), 锚定日 + 1 天)`。默认锚定北京时间当日。
 
 **执行流程：**
 
-1. 计算当日时间窗口（北京时间 00:00 ~ 次日 00:00 的毫秒时间戳）。
+1. 计算回溯时间窗口（北京时间，默认最近 10 天含锚定日 = `[锚定日 − 9 天 00:00, 锚定日 + 1 天 00:00)`，由 `daily_topics.lookback_days` 控制）。
 2. 从 `BrandTopicRules` 加载该品牌专属 4R prompt（自动截断「反漏斗/输出格式」章节）。
-3. 从 `daily_topics.app_token` / `table_id` 跨 base 读取当日候选话题（字段映射见 `daily_topics.fields`）。
-4. 并发调用 `compute_4r_score_with_model`，线程数走 `concurrency.max_workers`。
-5. 按总分 + R4 tie-break 降序取 Top K。
-6. 查 `TopicSelection` 当日该品牌已有话题名做幂等去重，写入剩余 Top K 并打上「适用品牌」字段。
+3. 从 `daily_topics.app_token` / `table_id` 跨 base 读取回溯窗口内候选话题（字段映射见 `daily_topics.fields`）。
+4. **热度预筛**：从候选话题 `raw_text` 中提取「今日热度」字段，按热度降序取前 `scoring_pool_size` 条进入 LLM 打分（默认 `max(top_k × 3, 15)`，由 `daily_topics.scoring_pool_size` 覆盖），避免对所有候选话题都调 LLM。
+5. 并发调用 `compute_4r_score_with_model`，线程数走 `concurrency.max_workers`。
+6. 按总分 + R4 tie-break 降序取 Top K。
+7. **去重**：查 `TopicSelection` 中**回溯窗口内**该品牌已有话题名做幂等去重（v5.9.0 起去重窗口与候选窗口对齐，不再仅查当日），写入剩余 Top K 并打上「适用品牌」字段。
 
 **示例：**
 
 ```bash
-# 按北京时间当日，为「加拿大鹅」筛选 Top 5 每日精选话题
+# 为「加拿大鹅」筛选最近 10 天 Top 5 每日精选话题（锚定今日）
 python3 user_skills/brand-content-marketing-advisor/main.py select_topic --brand "加拿大鹅"
 
-# 指定日期回溯筛选 Top 3
+# 锚定指定日期筛选 Top 3（窗口 = 最近 10 天，截至 2026-04-11）
 python3 user_skills/brand-content-marketing-advisor/main.py select_topic --brand "加拿大鹅" --date 2026-04-11 --top-k 3
 ```
 
-执行成功后在 stdout 输出 JSON 摘要：
+执行成功后在 stdout 输出 JSON 摘要（字段 `daily_topics_total` 表示预筛后进入打分的候选数）：
 
 ```json
 {
   "brand": "加拿大鹅",
   "date": "2026-04-12",
-  "daily_topics_total": 32,
-  "scored_count": 32,
+  "lookback_days": 10,
+  "daily_topics_total": 15,
+  "scored_count": 15,
   "top_k": 5,
   "written_count": 5,
   "skipped_dedup": 0,
+  "selected_topics": [
+    {"topic": "极寒寒潮来袭", "score": 18.5, "decision": "主推", "reason": "高相关 + 低风险 + 场景契合"}
+  ],
   "selected_record_ids": ["recxxx", "recyyy"]
 }
 ```

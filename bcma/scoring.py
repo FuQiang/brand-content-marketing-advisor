@@ -275,27 +275,42 @@ def _parse_4r_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+class LLMScoringError(RuntimeError):
+    """LLM 4R 打分失败（请求/解析/返回 None）。调用方应当丢弃该候选，
+    而不是回落到基于 SHA256 的伪随机启发式——伪随机 R4 有 ~40% 概率落入
+    veto 区间，会污染 Top K 结果。"""
+
+
 def compute_4r_score_with_model(
     candidate: CandidateTopic,
     rule_result: RuleResult,
     scoring_cfg: Dict[str, Any],
     model_cfg: Optional[Dict[str, Any]] = None,
     brand_rules_prompt: str = "",
+    heuristic_fallback: bool = True,
 ) -> FourRScore:
-    """LLM 4R scoring with brand-specific prompt, fallback to heuristics.
+    """LLM 4R scoring with brand-specific prompt.
 
     Args:
         brand_rules_prompt: BrandTopicRules 表中该品牌的筛选逻辑 prompt。
             传入非空字符串时，会将其作为 system context 注入 LLM 请求。
+        heuristic_fallback: LLM 不可用/失败时是否回落启发式打分。
+            True（默认）= 兼容旧 upstream 流水线行为；
+            False = 直接 raise LLMScoringError，由调用方丢弃候选。
+            daily_topics (Step 5) 必须传 False，避免伪随机结果进入 Top K。
     """
 
     if not model_cfg:
-        return compute_4r_score(candidate, rule_result, scoring_cfg)
+        if heuristic_fallback:
+            return compute_4r_score(candidate, rule_result, scoring_cfg)
+        raise LLMScoringError("model_cfg is empty; no usable LLM configured")
 
     scores = _call_llm_for_4r(candidate, model_cfg, brand_rules_prompt=brand_rules_prompt)
 
     if not scores:
-        return compute_4r_score(candidate, rule_result, scoring_cfg)
+        if heuristic_fallback:
+            return compute_4r_score(candidate, rule_result, scoring_cfg)
+        raise LLMScoringError(f"LLM returned no parseable 4R scores for topic={candidate.topic!r}")
 
     r1 = float(scores.get("relevance", 0))
     r2 = float(scores.get("resonance", 0))
