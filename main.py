@@ -103,7 +103,8 @@ def _preflight_write_check(cfg, brand: str, table_keys: list) -> None:
     if needs_user_authorization(cfg.app_token):
         token_type = get_client(cfg.app_token).get_token_type()  # "no_user_token"
         hint = (
-            "尚未完成飞书用户授权。请在飞书 Bot 会话里发送 /feishu_auth 完成授权后重试。"
+            "尚未完成飞书用户授权。请在本技能目录运行 `python3 main.py authorize` 完成授权"
+            "（只申请本技能所需的 13 个 scope，比 /feishu_auth 拉 100+ scope 更合理）。"
         )
         failures = {k: hint for k in table_map}
         _log.error("预检短路：%s (token_type=%s)", hint, token_type)
@@ -129,7 +130,7 @@ def _preflight_write_check(cfg, brand: str, table_keys: list) -> None:
         raise PermissionError(
             f"写入权限预检失败（{token_type}）。无法写入: "
             + ", ".join(failures.keys())
-            + "。请在飞书 Bot 会话里发送 /feishu_auth 重新授权。"
+            + "。请在本技能目录运行 `python3 main.py authorize` 重新授权（13 个最小 scope）。"
         )
     _log.info("写入权限预检通过 ✓")
 

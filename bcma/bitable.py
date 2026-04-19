@@ -162,7 +162,7 @@ class RetryableRateLimitError(Exception):
 
 
 class NoUserTokenError(RuntimeError):
-    """无可用用户令牌（UAT）。调用方应引导用户到飞书 Bot 里跑 /feishu_auth 重新授权。"""
+    """无可用用户令牌（UAT）。调用方应引导用户用本技能的 authorize 子命令（13 个最小 scope）完成授权。"""
     pass
 
 
@@ -170,8 +170,9 @@ _NO_UAT_HINT = (
     "无可用飞书用户令牌 (UAT)。当前技能已禁止 tenant_access_token 降级，"
     "因其权限不足以写入 brands / brand_audience / products / brand_topic_rules / "
     "topic_selection / content_matrix 等表。\n"
-    "请在飞书 Bot 会话中发送 `/feishu_auth` 完成用户授权，或设置环境变量 "
-    "LARK_USER_ACCESS_TOKEN 后重试。"
+    "推荐: 在当前技能目录下运行 `python3 main.py authorize` 完成授权"
+    "（只申请本技能所需的 13 个 scope；比 /feishu_auth 拉 100+ scope 更合理）。"
+    "也可设置环境变量 LARK_USER_ACCESS_TOKEN 后重试。"
 )
 
 
@@ -245,7 +246,7 @@ class BitableClient:
                 # 由调用方决定是提示用户重新授权还是跳过。
                 logger.error(
                     "飞书返回 403，当前 UAT 可能缺少此表/应用的权限 scope，"
-                    "请运行 /feishu_auth 重新授权或联系管理员补齐 scope"
+                    "请在本技能目录运行 `python3 main.py authorize` 重新授权（13 个最小 scope）。"
                 )
             raise
 
@@ -432,7 +433,7 @@ class BitableClient:
                 return False, (
                     "写入权限不足 (HTTP 403)。当前使用 user_access_token，"
                     "但该用户对此表/应用未授予写入 scope。"
-                    "请在飞书 Bot 会话里发 /feishu_auth 重新授权，或联系管理员补齐 scope。"
+                    "请在本技能目录运行 `python3 main.py authorize` 重新授权（13 个最小 scope）。"
                 )
             return False, f"写入预检失败 (HTTP {e.code}): {e}"
         except Exception as e:
@@ -444,7 +445,7 @@ class BitableClient:
             if "permission" in msg.lower() or "权限" in msg:
                 return False, (
                     f"写入权限不足: {msg}。当前使用 user_access_token，"
-                    "请在飞书 Bot 会话里发 /feishu_auth 重新授权获取更高 scope。"
+                    "请在本技能目录运行 `python3 main.py authorize` 重新授权（13 个最小 scope）。"
                 )
             return False, f"写入预检失败: {msg}"
 
@@ -512,19 +513,35 @@ def preflight_check_tables(
         msg = str(e)
         return {k: msg for k in table_map}
 
+    # 每张表要 3 次串行 API（list_fields + create + delete）。
+    # 6 张表串行 = ~18 次调用，~4-15s。并发化后 ~3 次调用耗时 + 少量排队 = ~1-3s。
+    pending: List[Tuple[str, str]] = []
     for table_key, table_id in table_map.items():
         if not table_id:
             failures[table_key] = "table_id 未配置"
             continue
-        ok, err = check_write_permission(app_token, table_id)
-        if not ok:
-            failures[table_key] = err
-            # 同一个 token 失败了，后续表大概率也会失败，快速终止
-            if "403" in err:
-                for remaining_key in table_map:
-                    if remaining_key not in failures and remaining_key != table_key:
-                        failures[remaining_key] = err
-                break
+        pending.append((table_key, table_id))
+
+    if not pending:
+        return failures
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    with ThreadPoolExecutor(max_workers=min(len(pending), 6)) as ex:
+        future_map = {
+            ex.submit(check_write_permission, app_token, tbl_id): key
+            for key, tbl_id in pending
+        }
+        for fut in as_completed(future_map):
+            key = future_map[fut]
+            try:
+                ok, err = fut.result()
+            except Exception as e:
+                failures[key] = f"写入预检异常: {e}"
+                continue
+            if not ok:
+                failures[key] = err
+
     return failures
 
 

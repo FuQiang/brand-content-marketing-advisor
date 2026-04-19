@@ -56,6 +56,7 @@ from .downstream import (
 )
 from .dreamina_cli import (
     image2image as _dreamina_image2image,
+    is_available as _dreamina_available,
     text2image as _dreamina_text2image,
     text2video as _dreamina_text2video,
 )

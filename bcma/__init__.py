@@ -30,7 +30,7 @@ from .bitable import (
 )
 from .card_sender import send_permission_error_card, send_step_card, send_step_card_to_current_user
 from .config import load_config
-from .daily_topics import run_brand_daily_selection
+from .daily_topics import DailyTopicsSourceMissingError, run_brand_daily_selection
 from .schema_sync import (
     DEFAULT_TABLE_KEYS as SCHEMA_SYNC_DEFAULT_TABLE_KEYS,
     sync_all_schemas,
@@ -48,6 +48,7 @@ __all__ = [
     "run_step4_topic_rules",
     "load_existing_audience",
     "run_brand_daily_selection",
+    "DailyTopicsSourceMissingError",
     "run_brand_content_pipeline",
     "sync_all_schemas",
     "sync_table_schema",

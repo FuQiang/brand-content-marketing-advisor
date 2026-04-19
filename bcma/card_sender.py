@@ -418,8 +418,8 @@ def send_permission_error_card(
     LARK_APP_ID / LARK_APP_SECRET / LARK_USER_OPEN_ID；仍缺失则跳过发送。
 
     根据 token_type 区分两种场景：
-      - `no_user_token` → 完全没授权：让用户首次在 Bot 会话里发 `/feishu_auth`。
-      - `user_access_token*` → 已授权但 scope 不足：让用户重新走 `/feishu_auth` 补齐 scope。
+      - `no_user_token` → 完全没授权：引导跑 `python3 main.py authorize`（13 个最小 scope）。
+      - `user_access_token*` → 已授权但 scope 不足：引导重新跑 `python3 main.py authorize` 补齐。
     """
     app_id, app_secret, user_open_id = _resolve_feishu_creds(app_id, app_secret, user_open_id)
     if not app_id or not app_secret or not user_open_id:
@@ -488,12 +488,12 @@ def send_permission_error_card(
             "text": {
                 "tag": "lark_md",
                 "content": (
-                    "**如何授权（30 秒搞定）:**\n"
-                    "1️⃣ 在本 Bot 会话里直接发送命令：`/feishu_auth`\n"
-                    "2️⃣ 按 Bot 返回的卡片点击"
-                    "「前往授权」并在飞书网页确认同意 scope\n"
-                    "3️⃣ 授权成功后重新跑一次 `run_all --brand \""
-                    f"{brand}\"` 即可"
+                    "**如何授权（推荐走最小 scope）:**\n"
+                    "1️⃣ 在本技能目录下执行：`python3 main.py authorize`\n"
+                    "2️⃣ 浏览器打开返回的链接并确认 **13 个 scope**（仅本技能必需，无多余权限）\n"
+                    "3️⃣ 授权成功后重新跑 `run_all --brand \""
+                    f"{brand}\"` 即可\n"
+                    "（不推荐 `/feishu_auth` —— 它会拉应用已开通的 100+ scope）"
                 ),
             },
         })
@@ -505,7 +505,7 @@ def send_permission_error_card(
                 "content": (
                     "**可能原因与处理:**\n"
                     "• 你已登录，但此应用缺少对上述表的 **写 scope**\n"
-                    "• 在本 Bot 会话里发送 `/feishu_auth` 重新勾选 scope 补齐；"
+                    "• 在本技能目录运行 `python3 main.py authorize` 重新授权（13 个最小 scope 包含必需写权限）；"
                     "若仍然 403，请联系应用管理员在开放平台补齐该表所属应用权限"
                 ),
             },

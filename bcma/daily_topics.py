@@ -25,13 +25,51 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .bitable import add_single, search_all_records
+from .bitable import add_single, list_table_fields, search_all_records
 from .config import Config
 from .scoring import FourRScore, RuleResult, compute_4r_score_with_model
 from .upstream import load_brand_rules_prompt
 from .utils import CandidateTopic, get_number_field, get_text_field, infer_persona, now_ts_ms
 
 logger = logging.getLogger("bcma.daily_topics")
+
+
+class DailyTopicsSourceMissingError(RuntimeError):
+    """daily_topics 数据源未配置或无法访问。
+
+    Step 5 必须读用户自己维护的"每日热门话题"表（通常由一个同级技能在首次运行时
+    创建并回填 app_token/table_id 到 config.yaml 的 daily_topics 段）。该表不
+    存在或无权访问时必须 fail-fast，不能静默返回空——否则 Step 5 会骗过 run_all
+    的"非空"判定跳进 Step 6，却没有任何数据可用。
+    """
+
+
+def _ensure_daily_topics_source(cfg: Config) -> None:
+    """校验 daily_topics 数据源：配置齐全 + 表可访问（用 list_fields 探测）。
+
+    Raises:
+        DailyTopicsSourceMissingError: 配置缺失、表不存在或读权限不足。
+    """
+    dt_cfg = cfg.raw.get("daily_topics") or {}
+    app_token = (dt_cfg.get("app_token") or "").strip()
+    table_id = (dt_cfg.get("table_id") or "").strip()
+
+    if not app_token or not table_id:
+        raise DailyTopicsSourceMissingError(
+            "daily_topics 数据源未配置。请先运行上游「每日热门话题」技能创建数据表，"
+            "再把该表的 app_token 与 table_id 写入 config.yaml 的 daily_topics 段"
+            "（字段：daily_topics.app_token / daily_topics.table_id）。"
+            "Step 5 必须有该数据源才能筛选话题。"
+        )
+
+    try:
+        list_table_fields(app_token, table_id)
+    except Exception as e:
+        raise DailyTopicsSourceMissingError(
+            f"daily_topics 表不可访问：app_token={app_token!r} table_id={table_id!r}。"
+            f"原因：{e}。请确认上游「每日热门话题」技能已创建该表，"
+            "且当前 UAT 具备该 base 的读权限。"
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +555,10 @@ def run_brand_daily_selection(
     brand = (brand or "").strip()
     if not brand:
         raise ValueError("brand 不能为空")
+
+    # 硬检查: 数据源必须可访问；失败直接抛 DailyTopicsSourceMissingError
+    # 让上层 run_all 记作错误而不是继续跑 Step 6 白白浪费 LLM/dreamina 积分。
+    _ensure_daily_topics_source(cfg)
 
     dt_cfg = cfg.raw.get("daily_topics") or {}
     tz_offset = int(dt_cfg.get("timezone_offset_hours", 8))
