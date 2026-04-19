@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# 用户本地配置（含真实 Bitable app_token / table_id），禁止入库。
+# 发布时以 config.yaml.template 为准，首次运行由用户复制并填写。
+config.yaml
+
+# openclaw / aime 本地状态
+.aime/.setup_status
