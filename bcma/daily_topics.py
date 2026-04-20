@@ -73,73 +73,7 @@ def _ensure_daily_topics_source(cfg: Config) -> None:
 
 
 # ---------------------------------------------------------------------------
-#  Time window helpers (Asia/Shanghai by default)
-# ---------------------------------------------------------------------------
-
-def _today_window_ms(tz_offset_hours: int, date_str: Optional[str] = None) -> Tuple[int, int, str]:
-    """返回当日 [00:00, 次日 00:00) 的毫秒时间戳区间与日期字符串。
-
-    Args:
-        tz_offset_hours: 时区偏移（小时），北京时间为 8。
-        date_str: 指定日期 'YYYY-MM-DD'；None 时使用当前时间所在日。
-
-    Returns:
-        (start_ms_inclusive, end_ms_exclusive, date_str)
-    """
-    tz = timezone(timedelta(hours=int(tz_offset_hours)))
-
-    if date_str:
-        try:
-            day = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=tz)
-        except ValueError as e:
-            raise ValueError(f"date 参数格式错误，应为 YYYY-MM-DD: {date_str}") from e
-    else:
-        now_local = datetime.now(tz=tz)
-        day = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    start = day
-    end = day + timedelta(days=1)
-    start_ms = int(start.timestamp() * 1000)
-    end_ms = int(end.timestamp() * 1000)
-    return start_ms, end_ms, day.strftime("%Y-%m-%d")
-
-
-def _lookback_window_ms(
-    tz_offset_hours: int,
-    lookback_days: int,
-    date_str: Optional[str] = None,
-) -> Tuple[int, int, str]:
-    """返回 [N天前 00:00, 次日 00:00) 的毫秒时间戳区间，用于扩大候选话题池。
-
-    Args:
-        tz_offset_hours: 时区偏移（小时），北京时间为 8。
-        lookback_days: 向前回溯天数（含当天）。10 = 当天 + 过去 9 天。
-        date_str: 锚定日期 'YYYY-MM-DD'；None 时使用当前时间所在日。
-
-    Returns:
-        (start_ms_inclusive, end_ms_exclusive, anchor_date_str)
-    """
-    tz = timezone(timedelta(hours=int(tz_offset_hours)))
-
-    if date_str:
-        try:
-            day = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=tz)
-        except ValueError as e:
-            raise ValueError(f"date 参数格式错误，应为 YYYY-MM-DD: {date_str}") from e
-    else:
-        now_local = datetime.now(tz=tz)
-        day = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    lookback = max(1, int(lookback_days))
-    start = day - timedelta(days=lookback - 1)
-    end = day + timedelta(days=1)
-    start_ms = int(start.timestamp() * 1000)
-    end_ms = int(end.timestamp() * 1000)
-    return start_ms, end_ms, day.strftime("%Y-%m-%d")
-
-
-# ---------------------------------------------------------------------------
-#  Step A - Load candidates from external base (lookback window)
+#  Step A - Load candidates from external base (T-1 with fallback walk-back)
 # ---------------------------------------------------------------------------
 
 def _parse_date_field_to_ms(
@@ -197,11 +131,15 @@ def _build_raw_text(fields: Dict[str, Any], f_map: Dict[str, str]) -> str:
     # 拼接扩展字段
     parts: List[str] = []
     label_map = [
-        ("category", "归类"),
+        # 关键信号：已爆 vs 连升 直接影响 R3 打分（上升期/衰退期）
+        ("category", "分类"),
+        # 榜内排名 + 热度量级，补充 R3 的量级判断
+        ("rank", "榜内排名"),
+        ("heat", "热度"),
+        # ip-collab 数据源特有字段，切到 hot-topic 后映射为空，自动跳过
         ("content_direction", "承接方向"),
         ("suggested_action", "建议动作"),
         ("target_audience", "目标人群"),
-        ("heat", "今日热度"),
         ("heat_delta", "日增幅"),
         ("rising_days", "连涨天数"),
     ]
@@ -209,7 +147,13 @@ def _build_raw_text(fields: Dict[str, Any], f_map: Dict[str, str]) -> str:
         field_name = f_map.get(key, "")
         if not field_name:
             continue
-        val = get_text_field(fields, field_name, "").strip()
+        raw_val = fields.get(field_name)
+        if raw_val is None:
+            continue
+        if isinstance(raw_val, (int, float)):
+            val = str(int(raw_val)) if float(raw_val).is_integer() else f"{raw_val:g}"
+        else:
+            val = get_text_field(fields, field_name, "").strip()
         if not val or val == "null":
             continue
         parts.append(f"{label}: {val}")
@@ -217,15 +161,57 @@ def _build_raw_text(fields: Dict[str, Any], f_map: Dict[str, str]) -> str:
     return "\n".join(parts)
 
 
+def _pick_anchor_date(
+    records: List[Dict[str, Any]],
+    created_field: str,
+    anchor_hint: str,
+    max_rollback_days: int,
+) -> Optional[str]:
+    """在表里所有 `日期` 字段中,挑出 ≤ anchor_hint 的最大一个作为锚定日。
+
+    最多只往前回退 max_rollback_days 天(防异常表里有遥远过去记录)。
+    返回 "YYYY-MM-DD" 或 None(完全无可用日期)。
+    """
+    if not records:
+        return None
+
+    # 收集所有出现过的日期字符串(YYYY-MM-DD 格式可直接字符串比较)
+    all_dates: Set[str] = set()
+    for item in records:
+        fields = item.get("fields") or {}
+        d = get_text_field(fields, created_field, "").strip()
+        if d:
+            all_dates.add(d)
+
+    if not all_dates:
+        return None
+
+    # 计算回退下界
+    try:
+        anchor_dt = datetime.strptime(anchor_hint, "%Y-%m-%d")
+    except ValueError:
+        return None
+    floor = (anchor_dt - timedelta(days=max(0, int(max_rollback_days)))).strftime("%Y-%m-%d")
+
+    eligible = [d for d in all_dates if floor <= d <= anchor_hint]
+    return max(eligible) if eligible else None
+
+
 def _fetch_daily_topics(
     cfg: Config,
-    start_ms: int,
-    end_ms: int,
-) -> List[CandidateTopic]:
-    """从外部 base 读取时间窗口内的候选话题，字段映射由 config.daily_topics.fields 决定。
+    anchor_hint: str,
+    max_rollback_days: int,
+) -> Tuple[List[CandidateTopic], Optional[str]]:
+    """从外部 base 读取候选话题,挑出 ≤ anchor_hint 的最近一天,只返回该日记录。
 
-    支持多种时间字段格式（毫秒/秒时间戳、YYYY-MM-DD 文本）以及 raw_text 多字段拼接。
-    若字段不存在或无法判定时间，该条记录会被跳过。
+    Args:
+        anchor_hint: 锚定日上限,通常是 T-1。"YYYY-MM-DD"。
+        max_rollback_days: 若 anchor_hint 当天无数据,最多往前回退多少天找最近一天。
+
+    Returns:
+        (candidates, picked_anchor_date):
+        - picked_anchor_date 为实际命中的那一天("YYYY-MM-DD"),若完全无数据则 None
+        - candidates 为该日全部记录归一化成 CandidateTopic 的结果
     """
     dt_cfg = cfg.raw.get("daily_topics") or {}
     app_token = (dt_cfg.get("app_token") or "").strip()
@@ -235,10 +221,9 @@ def _fetch_daily_topics(
 
     if not app_token or not table_id:
         logger.warning(
-            "daily_topics.app_token / daily_topics.table_id 未配置，无法读取每日精选话题表。"
-            "请在 config.yaml 的 daily_topics 段填写外部数据源信息。"
+            "daily_topics.app_token / daily_topics.table_id 未配置,无法读取每日精选话题表。"
         )
-        return []
+        return [], None
 
     f_map = dt_cfg.get("fields") or {}
     topic_field = f_map.get("topic", "话题")
@@ -255,12 +240,27 @@ def _fetch_daily_topics(
     )
     if not records:
         logger.info("每日精选话题表当前无记录")
-        return []
+        return [], None
+
+    anchor_date = _pick_anchor_date(records, created_field, anchor_hint, max_rollback_days)
+    if not anchor_date:
+        logger.warning(
+            "T-1=%s 及往前 %d 天内表里均无记录,无候选话题",
+            anchor_hint, max_rollback_days,
+        )
+        return [], None
+
+    if anchor_date != anchor_hint:
+        logger.info(
+            "锚定日回退: T-1=%s 无数据 → 命中最近一天 %s",
+            anchor_hint, anchor_date,
+        )
+    else:
+        logger.info("锚定日 = T-1 = %s", anchor_date)
 
     candidates: List[CandidateTopic] = []
     skipped_no_topic = 0
-    skipped_out_of_window = 0
-    skipped_no_time = 0
+    skipped_other_date = 0
 
     for item in records:
         fields = item.get("fields") or {}
@@ -270,32 +270,17 @@ def _fetch_daily_topics(
             skipped_no_topic += 1
             continue
 
-        # 时间解析（支持时间戳 + YYYY-MM-DD 文本）
-        created_ms = _parse_date_field_to_ms(fields, created_field, tz_offset)
-
-        # 兜底：读自动字段 created_time
-        if not created_ms:
-            auto_ct = fields.get("created_time")
-            if isinstance(auto_ct, (int, float)):
-                created_ms = int(auto_ct)
-                if created_ms < 10**12:
-                    created_ms *= 1000
-
-        if not created_ms:
-            skipped_no_time += 1
-            continue
-
-        if not (start_ms <= created_ms < end_ms):
-            skipped_out_of_window += 1
+        day_str = get_text_field(fields, created_field, "").strip()
+        if day_str != anchor_date:
+            skipped_other_date += 1
             continue
 
         source = get_text_field(fields, source_field, "")
         raw_text = _build_raw_text(fields, f_map)
 
-        # 抓取时间
         fetched_ms = _parse_date_field_to_ms(fields, fetched_field, tz_offset)
         if not fetched_ms:
-            fetched_ms = created_ms
+            fetched_ms = _parse_date_field_to_ms(fields, created_field, tz_offset)
 
         candidates.append(
             CandidateTopic(
@@ -307,14 +292,10 @@ def _fetch_daily_topics(
         )
 
     logger.info(
-        "每日精选话题读取完成: total=%d, candidates=%d, skipped(no_topic=%d, no_time=%d, out_of_window=%d)",
-        len(records),
-        len(candidates),
-        skipped_no_topic,
-        skipped_no_time,
-        skipped_out_of_window,
+        "每日精选话题读取: 锚定日=%s, total=%d, candidates=%d, skipped(no_topic=%d, other_date=%d)",
+        anchor_date, len(records), len(candidates), skipped_no_topic, skipped_other_date,
     )
-    return candidates
+    return candidates, anchor_date
 
 
 # ---------------------------------------------------------------------------
@@ -563,19 +544,16 @@ def run_brand_daily_selection(
     dt_cfg = cfg.raw.get("daily_topics") or {}
     tz_offset = int(dt_cfg.get("timezone_offset_hours", 8))
     effective_top_k = int(top_k if top_k is not None else dt_cfg.get("top_k", 5)) or 5
-    lookback_days = int(dt_cfg.get("lookback_days", 10))
+    max_rollback_days = int(dt_cfg.get("max_rollback_days", 14))
 
-    # 1a) 计算候选话题的回溯窗口（过去 N 天）
-    fetch_start_ms, fetch_end_ms, date_str = _lookback_window_ms(tz_offset, lookback_days, date)
-    # 1b) 去重窗口与候选窗口对齐（v5.9.0: 从仅当日改为同样 lookback_days）
-    dedup_start_ms, dedup_end_ms = fetch_start_ms, fetch_end_ms
-
-    logger.info(
-        "候选话题窗口: 回溯 %d 天 (%s ~ %s)，去重窗口: 同步",
-        lookback_days,
-        datetime.fromtimestamp(fetch_start_ms / 1000, tz=timezone(timedelta(hours=tz_offset))).strftime("%Y-%m-%d"),
-        date_str,
-    )
+    # 1) 锚定日 = --date 或 北京时间 T-1。真正命中的日期由 _fetch_daily_topics 决定
+    #    (当天无数据时回退最多 max_rollback_days 天)。
+    tz = timezone(timedelta(hours=tz_offset))
+    if date:
+        anchor_hint = date
+    else:
+        anchor_hint = (datetime.now(tz=tz) - timedelta(days=1)).strftime("%Y-%m-%d")
+    logger.info("锚定日提示 = %s (回退上限 %d 天)", anchor_hint, max_rollback_days)
 
     # 2) 加载品牌专属 4R prompt（未找到时回落通用 prompt）
     brand_rules_prompt = load_brand_rules_prompt(cfg, brand)
@@ -593,22 +571,24 @@ def run_brand_daily_selection(
             brand,
         )
 
-    # 3) 从外部 base 读取过去 N 天候选话题
+    # 3) 从外部 base 读取锚定日(T-1 或回退后最近一天)的候选话题
     dt_app_token = (dt_cfg.get("app_token") or "").strip()
     dt_table_id = (dt_cfg.get("table_id") or "").strip()
     daily_topics_configured = bool(dt_app_token and dt_table_id)
 
-    candidates = _fetch_daily_topics(cfg, fetch_start_ms, fetch_end_ms)
+    candidates, anchor_date = _fetch_daily_topics(cfg, anchor_hint, max_rollback_days)
+    date_str = anchor_date or anchor_hint
     if not candidates:
         note = (
-            "daily_topics 未配置（app_token/table_id 为空），请在 config.yaml 中填写外部数据源"
+            "daily_topics 未配置(app_token/table_id 为空),请在 config.yaml 中填写外部数据源"
             if not daily_topics_configured
-            else f"过去 {lookback_days} 天每日精选话题表为空，未产生筛选结果"
+            else f"T-1={anchor_hint} 及往前 {max_rollback_days} 天内无可用数据,未产生筛选结果"
         )
         return {
             "brand": brand,
             "date": date_str,
-            "lookback_days": lookback_days,
+            "anchor_hint": anchor_hint,
+            "max_rollback_days": max_rollback_days,
             "daily_topics_total": 0,
             "scored_count": 0,
             "top_k": effective_top_k,
@@ -618,18 +598,24 @@ def run_brand_daily_selection(
             "note": note,
         }
 
+    # 锚定日 00:00 ~ 次日 00:00 的毫秒区间,用于 TopicSelection 去重
+    anchor_dt = datetime.strptime(anchor_date, "%Y-%m-%d").replace(tzinfo=tz)
+    dedup_start_ms = int(anchor_dt.timestamp() * 1000)
+    dedup_end_ms = int((anchor_dt + timedelta(days=1)).timestamp() * 1000)
+
     # 3b) 预筛：按热度降序取 Top scoring_pool_size 进入 LLM 打分
     #     避免对所有候选话题都调 LLM，大幅缩短耗时
     scoring_pool_size = int(dt_cfg.get("scoring_pool_size", 0)) or max(effective_top_k * 3, 15)
     if len(candidates) > scoring_pool_size:
-        # 从 raw_text 里提取热度数值做排序（"今日热度: 12345" 格式）
+        # 从 raw_text 里提取热度数值做排序("热度: 12345" 格式,label 由
+        # _build_raw_text::label_map 决定,改 label 要同步改这里)
         def _extract_heat(c: CandidateTopic) -> float:
             for line in (c.raw_text or "").split("\n"):
-                if "今日热度" in line:
-                    parts = line.split(":")
-                    if len(parts) >= 2:
+                if line.startswith("热度:"):
+                    parts = line.split(":", 1)
+                    if len(parts) == 2:
                         try:
-                            return float(parts[-1].strip())
+                            return float(parts[1].strip())
                         except ValueError:
                             pass
             return 0.0
@@ -669,7 +655,9 @@ def run_brand_daily_selection(
     return {
         "brand": brand,
         "date": date_str,
-        "lookback_days": lookback_days,
+        "anchor_hint": anchor_hint,
+        "max_rollback_days": max_rollback_days,
+        "rollback_triggered": anchor_date != anchor_hint,
         "daily_topics_total": len(candidates),
         "scored_count": len(scored),
         "top_k": effective_top_k,
