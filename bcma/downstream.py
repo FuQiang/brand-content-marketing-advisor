@@ -58,6 +58,9 @@ class ProductRecord:
     selling_point: str
     selling_detail: str
     fields: Dict[str, Any]
+    lifecycle_stage: str = ""   # 新品 / 经典爆品 / 常规款
+    launch_date: str = ""
+    source_url: str = ""
 
 
 @dataclass
@@ -147,8 +150,14 @@ def ensure_persona_for_topics(cfg: Config, topics: List[TopicRecord]) -> None:
 # --------------------------- Product helpers ---------------------------
 
 
-def load_products(cfg: Config) -> List[ProductRecord]:
-    """Load all products from Products table."""
+def load_products(cfg: Config, brand: Optional[str] = None) -> List[ProductRecord]:
+    """Load products from Products table.
+
+    `brand` 不为空时**必须**按 f["brand"] 字段精确过滤——只返回该品牌的产品。
+    这是硬约束：Step 6 生成品牌内容时，一旦跨品牌混入别家 SKU，会出现例如"双汇文案
+    配悦鲜活/简醇"这种品牌穿帮事故（2026-04-20 双汇事件根因）。
+    调用方负责处理空返回（上游应当停机，不应 fallback 到全表产品池）。
+    """
 
     app_token = cfg.app_token
     tbl_id = cfg.tables["products"]["table_id"]
@@ -157,6 +166,7 @@ def load_products(cfg: Config) -> List[ProductRecord]:
     records = search_all_records(app_token, tbl_id, view_id=None, automatic_fields=False, page_size=200)
 
     result: List[ProductRecord] = []
+    brand_norm = (brand or "").strip()
     for item in records:
         rid = item.get("record_id")
         if not rid:
@@ -165,9 +175,16 @@ def load_products(cfg: Config) -> List[ProductRecord]:
         name = get_text_field(fields, f_cfg["name"], "")
         if not name:
             continue
+        if brand_norm:
+            item_brand = get_text_field(fields, f_cfg["brand"], "")
+            if item_brand.strip() != brand_norm:
+                continue
         series = get_text_field(fields, f_cfg["series"], "")
         selling_point = get_text_field(fields, f_cfg["selling_point"], "")
         selling_detail = get_text_field(fields, f_cfg["selling_point_detail"], "")
+        lifecycle = get_text_field(fields, f_cfg.get("lifecycle_stage", ""), "")
+        launch_date = get_text_field(fields, f_cfg.get("launch_date", ""), "")
+        source_url = get_text_field(fields, f_cfg.get("source_url", ""), "")
 
         result.append(
             ProductRecord(
@@ -177,6 +194,9 @@ def load_products(cfg: Config) -> List[ProductRecord]:
                 selling_point=selling_point,
                 selling_detail=selling_detail,
                 fields=fields,
+                lifecycle_stage=lifecycle,
+                launch_date=launch_date,
+                source_url=source_url,
             )
         )
 
@@ -234,6 +254,12 @@ def _score_product_for_topic(
         if "冬" in season and ("冬" in topic_text or "寒" in topic_text or "冷" in topic_text):
             score += 5
 
+    # 生命周期加成:经典爆品更安全(复购/口碑),新品更有话题感(首发/稀缺)
+    if product.lifecycle_stage == "经典爆品":
+        score += 8
+    elif product.lifecycle_stage == "新品":
+        score += 6
+
     return score
 
 
@@ -243,7 +269,11 @@ def select_top_products(
     topic: TopicRecord,
     products: List[ProductRecord],
 ) -> List[ProductRecord]:
-    """Select top-N products for a given topic/persona."""
+    """Select top-N products for a given topic/persona.
+
+    v5.10.0: Top-K 选品必须兼顾「新品 + 经典爆品」。Top-K >= 2 时,
+    若候选池里两类都有,至少各保留 1 款;不足时由其他高分产品补齐。
+    """
 
     if not products:
         return []
@@ -255,7 +285,30 @@ def select_top_products(
 
     scored.sort(key=lambda x: x[0], reverse=True)
     top_k = int(cfg.downstream.get("max_products_per_topic", 2)) or 2
-    return [p for _, p in scored[:top_k]]
+
+    if top_k <= 1:
+        return [p for _, p in scored[:top_k]]
+
+    # Top-K >= 2:尽量保证至少 1 新品 + 1 经典爆品
+    top_latest = next((p for _, p in scored if p.lifecycle_stage == "新品"), None)
+    top_classic = next((p for _, p in scored if p.lifecycle_stage == "经典爆品"), None)
+
+    picked: List[ProductRecord] = []
+    picked_ids: set[str] = set()
+    for p in (top_latest, top_classic):
+        if p and p.record_id not in picked_ids:
+            picked.append(p)
+            picked_ids.add(p.record_id)
+
+    for _, p in scored:
+        if len(picked) >= top_k:
+            break
+        if p.record_id in picked_ids:
+            continue
+        picked.append(p)
+        picked_ids.add(p.record_id)
+
+    return picked[:top_k]
 
 
 # --------------------------- Copywriting ---------------------------

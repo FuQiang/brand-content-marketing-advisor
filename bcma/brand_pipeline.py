@@ -680,23 +680,18 @@ def run_brand_content_pipeline(
     # 3) 补全人群标签
     ensure_persona_for_topics(cfg, topics)
 
-    # 4) 读取产品池
-    products: List[ProductRecord] = load_products(cfg)
+    # 4) 读取产品池 —— 硬约束：只拉当前品牌的产品；没有就直接终止，绝不 fallback 全表
+    #    2026-04-20 双汇事件教训：Step 3 Products 写入因 FieldNameNotFound 全失败后，
+    #    Step 6 原来 `load_products(cfg)` 整表加载，把别家品牌的 SKU（悦鲜活/简醇）
+    #    配到双汇文案里，造成品牌穿帮。用户明令："不要跨品牌拉，找不到就停下来"。
+    products: List[ProductRecord] = load_products(cfg, brand=brand)
     if not products:
-        return {
-            "brand": brand,
-            "topic_count": len(topics),
-            "content_created_count": 0,
-            "asset_top_k": top_k,
-            "asset_cover_uploaded": 0,
-            "asset_video_uploaded": 0,
-            "created_record_ids": [],
-            "top_record_ids": [],
-            "product_gallery_updated_count": gallery_updated_count,
-            "product_gallery_updated_ids": gallery_updated_ids,
-            "product_empty_columns_deleted_count": deleted_count,
-            "product_empty_columns_deleted": deleted_fields,
-        }
+        raise RuntimeError(
+            f"Products 表中没有品牌 '{brand}' 的任何产品记录，"
+            f"已终止 Step 6（严禁跨品牌 fallback）。"
+            f"请先成功执行 Step 3 `init_products --brand \"{brand}\"` 写入该品牌产品后重试；"
+            f"若 Step 3 写入静默失败，检查 Bitable 日志里的 FieldNameNotFound 或权限 403。"
+        )
 
     # 5) 生成文案并写入 ContentMatrix（v5.6.0：显式传 brand 以驱动双平台 LLM 文案）
     items: List[GeneratedContentItem] = generate_content_items(

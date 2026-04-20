@@ -211,6 +211,33 @@ def _fetch_open_id(access_token: str) -> str:
 # CLI 入口
 # ─────────────────────────────────────────────────────────────────
 
+def _load_app_creds_from_openclaw() -> Tuple[str, str]:
+    """从 ~/.openclaw/openclaw.json 的 channels.feishu 段读取 appId/appSecret。
+
+    环境变量 LARK_APP_ID / LARK_APP_SECRET 未设置时的回退路径 —— 让本技能在
+    openclaw-lark 已配置好飞书应用的场景里开箱即用，不要求用户再手工 export。
+    """
+    candidates = [
+        Path(os.environ.get("OPENCLAW_HOME", "")) / "openclaw.json" if os.environ.get("OPENCLAW_HOME") else None,
+        Path.home() / ".openclaw" / "openclaw.json",
+    ]
+    for path in candidates:
+        if not path or not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning("读取 %s 失败: %s", path, e)
+            continue
+        feishu = ((data.get("channels") or {}).get("feishu") or {})
+        app_id = (feishu.get("appId") or "").strip()
+        app_secret = (feishu.get("appSecret") or "").strip()
+        if app_id and app_secret:
+            logger.info("已从 %s 回退读取飞书应用凭证", path)
+            return app_id, app_secret
+    return "", ""
+
+
 def run_authorize() -> Dict:
     """执行 device-flow 授权，把 UAT 加密写入 .bcma.enc 文件。
 
@@ -219,9 +246,12 @@ def run_authorize() -> Dict:
     app_id = os.environ.get("LARK_APP_ID", "").strip()
     app_secret = os.environ.get("LARK_APP_SECRET", "").strip()
     if not app_id or not app_secret:
+        app_id, app_secret = _load_app_creds_from_openclaw()
+    if not app_id or not app_secret:
         raise RuntimeError(
-            "缺少飞书应用凭证：请设置环境变量 LARK_APP_ID / LARK_APP_SECRET "
-            "为当前调用方飞书应用的 App ID / App Secret 后重试。"
+            "缺少飞书应用凭证：未找到环境变量 LARK_APP_ID / LARK_APP_SECRET，"
+            "也未能从 ~/.openclaw/openclaw.json 的 channels.feishu 段读取到 "
+            "appId / appSecret。请配置其中之一后重试。"
         )
     scope = " ".join(SKILL_SCOPES)
 

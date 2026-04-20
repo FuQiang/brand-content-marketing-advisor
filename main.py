@@ -355,6 +355,24 @@ def main() -> None:
         _preflight_write_check(cfg, brand, _STEP_WRITE_TABLES["run_all"])
 
         logger = logging.getLogger("bcma.main")
+
+        # Step 0.5: 自动 schema 对齐 — run_all 承诺"首次运行自动建表 + 无手工前置"，
+        # 旧版本上线新字段时若不在这里自动建列，Step 3 写 Products 会 FieldNameNotFound
+        # 全部失败，Step 6 再跨品牌捞别家 SKU 做文案。brands 表被 HARD_SKIP_TABLE_KEYS
+        # 硬跳过；记录数 < 3 时 schema_sync 也会跳过删除阶段——只会幂等地补齐缺失字段。
+        logger.info("===== run_all Step 0.5: 自动 schema 对齐 =====")
+        try:
+            schema_summary = sync_all_schemas(cfg)
+            created = schema_summary.get("created_fields", {}) or {}
+            if any(v for v in created.values()):
+                logger.info("schema 对齐新建字段: %s", {k: [x.get("field_name") for x in v] for k, v in created.items() if v})
+            else:
+                logger.info("schema 对齐完成，所有托管表字段齐全，无新建")
+            errs = schema_summary.get("errors", {}) or {}
+            if errs:
+                logger.warning("schema 对齐存在表级错误: %s", errs)
+        except Exception as e:
+            logger.warning("schema 对齐失败（继续后续步骤）: %s", e, exc_info=True)
         step_errors: Dict[int, str] = {}
 
         def _run_step(step_num: int, step_name: str, func, *a, **kw) -> Any:

@@ -1,12 +1,37 @@
 ---
 name: brand-content-marketing-advisor
-description: 全链路品牌内容营销中枢 v5.9.3。强制用户授权访问飞书多维表（禁止 tenant_access_token 降级，无 UAT 时直接报错引导 /feishu_auth）。首次运行自动建表 + 自动生成品牌数据，无需手工前置。推荐用 `run_all --brand "品牌名"` 一键执行 6 步全流程（init_brand → init_audience → init_products → init_topic_rules → select_topic → generate_brand_content），单步失败不中断后续。全程回填飞书多维表格，每步发卡片通知。
+description: 全链路品牌内容营销中枢 v5.9.3。强制用户授权访问飞书多维表（禁止 tenant_access_token 降级；无 UAT 时**只能**跑 `python3 main.py authorize` 走 13-scope device flow，严禁调用 openclaw-lark 的 `feishu_oauth_batch_auth` MCP 工具或 `/feishu_auth` 命令——它们会一次性拉全 100+ scope）。首次运行自动建表 + 自动生成品牌数据，无需手工前置。推荐用 `run_all --brand "品牌名"` 一键执行 6 步全流程（init_brand → init_audience → init_products → init_topic_rules → select_topic → generate_brand_content），单步失败不中断后续。全程回填飞书多维表格，每步发卡片通知。
 version: v5.9.3
 ---
 
 # 品牌内容营销参谋 (v5.9.3)
 
 本 Skill 提供一个全链路、6 步独立 CLI 的营销内容中枢系统。**首次运行自动创建飞书多维表格和全部表结构，品牌不存在时自动 LLM 生成基础数据，无需任何手工前置步骤。** 推荐使用 `run_all` 一键执行全流程。通过 6 个可独立运行的子命令，逐步完成品牌人群画像、产品线、专属 4R 话题筛选策略的数据建设，以及每日精选话题筛选和双平台内容生产的完整自动化流水线。
+
+## ⚠️ 授权红线（执行体必读）
+
+> 本技能遇到"未授权/权限不足"错误时，**授权路径只有一条**：
+>
+> ```bash
+> python3 /home/admin/.openclaw/skills/brand-content-marketing-advisor/main.py authorize
+> ```
+>
+> 该命令走本技能专属的 RFC 8628 device flow，**只申请 13 个 scope**（多维表格读写 + 附件上下载 + offline_access）。`LARK_APP_ID` / `LARK_APP_SECRET` 未设时自动从 `~/.openclaw/openclaw.json` 的 `channels.feishu` 段回退读取，无需任何手工 export。
+>
+> **严禁的降级路径**（见过真实事故）：
+> - ❌ 不要调用 `feishu_oauth_batch_auth` MCP 工具 —— 它一次性申请应用已开通的全部 100+ user scope，授权面远超本技能所需。
+> - ❌ 不要在飞书群/私聊里发 `/feishu_auth` 命令 —— 同上，openclaw-lark 的通用批量授权会拉全量 scope。
+> - ❌ `main.py authorize` 报错时（例如凭证读取失败），**直接排查报错信息**（检查 `~/.openclaw/openclaw.json` 的 `channels.feishu` 段是否齐全），不要自作主张切到上面两个降级工具。
+
+## ⚠️ 产品隔离红线（Step 6 必读）
+
+> **Step 6 `generate_brand_content` 的产品池严格限定在当前品牌范围内。**
+> `downstream.load_products(cfg, brand=...)` 按 `f["brand"]` 字段精确过滤，只返回 `所属品牌=<当前品牌>` 的记录。一旦品牌产品池为空：
+>
+> - ✅ 直接 `raise RuntimeError`，Step 6 终止，不写任何 ContentMatrix 记录；
+> - ❌ **严禁** fallback 到全表产品池 —— 跨品牌混用 SKU 会造成例如"双汇文案配悦鲜活/简醇0蔗糖酸奶"这种品牌穿帮事故（2026-04-20 双汇事件根因）。
+>
+> 遇到 Step 6 报 `Products 表中没有品牌 '<X>' 的任何产品记录`：先跑 `init_products --brand "<X>"` 写入产品；若 Step 3 显示 `products_created > 0` 但表里其实空的，查 Bitable 日志里的 `FieldNameNotFound` 或 403——这是 Step 3 静默失败的两大典型原因。
 
 ## 版本概览
 
@@ -22,9 +47,9 @@ version: v5.9.3
   - **动机**：之前 brands / brand_audience / products / brand_topic_rules / topic_selection / content_matrix 全走 tenant_access_token 降级，飞书返回 403 写入权限不足（应用没有对这些表的写 scope）。改为强制用户授权方式后，权限随登录用户走，天然满足写入诉求。
   - **影响面**：
     - `BitableClient._call_api` 收到 403 时不再自动把 `self._user_token` 置空退回 tenant token，而是记录 error log 直接上抛，避免"偷偷降级"制造隐性数据不一致；
-    - `preflight_write_check` 错误文案改为引导用户在飞书 Bot 会话里发 `/feishu_auth` 重新授权；
+    - `preflight_write_check` 错误文案改为引导用户在本技能目录跑 `python3 main.py authorize` 重新授权（13 个最小 scope）；**严禁** 回退到 `/feishu_auth` 或 `feishu_oauth_batch_auth`（二者会一次性申请 100+ scope）；
     - `get_token_type()` 新增 `no_user_token` 枚举值（原来无 UAT 时返回 `tenant_access_token`）。
-  - **触发 UAT 授权的方式**：在 openclaw-lark 机器人会话里发送 `/feishu_auth`（由 `@larksuite/openclaw-lark` 的 `commands/auth.js` 处理），完成后加密 UAT 会写入 `${XDG_DATA_HOME:-~/.local/share}/openclaw-feishu-uat/*.enc`，本技能自动读取。
+  - **触发 UAT 授权的方式**：跑 `python3 main.py authorize`（本技能 v5.9.3 新增入口，13 个最小 scope），加密 UAT 写入 `${XDG_DATA_HOME:-~/.local/share}/openclaw-feishu-uat/*.bcma.enc`，本技能优先读取；同目录下 openclaw-lark 通用 `*.enc` 作为 fallback 共存。**严禁** 退回到 `/feishu_auth` 或 `feishu_oauth_batch_auth` MCP 工具。
   - 其他业务逻辑完全不变。
 
 - **v5.8.0**
@@ -143,11 +168,12 @@ version: v5.9.3
   - 使用内置 `_TOPIC_RULES_SKELETON` 骨架，由 LLM 基于 Brand 表 + 品牌人群表内容填充所有 `<<>>` 槽位。生成结果经严格校验，通过后 upsert 写入 `BrandTopicRules` 表。
 
 - **Step 5: 每日精选话题筛选（select_topic）**
-  - 跨 base 从外部「每日精选话题」表（`daily_topics.app_token` / `table_id` / `view_id`）读取**北京时间回溯窗口**内的候选话题（窗口长度由 `daily_topics.lookback_days` 控制，默认 10 天含锚定日，CLI `--date` 覆盖锚定日）；
-  - **热度预筛**：按候选 `raw_text` 中「今日热度」字段降序取 Top `scoring_pool_size` 条（默认 `max(top_k × 3, 15)`）进入 LLM 打分，避免全量调用；
+  - 跨 base 从 `hot-topic-insight` 技能的 snapshot 表（`daily_topics.app_token` / `table_id`）读取**单日候选话题**：默认锚定日 = 北京时间 T-1，该日若无数据自动往前回退最多 `daily_topics.max_rollback_days` 天（默认 14）找最近一天。CLI `--date` 可显式覆盖锚定日；
+  - 每条候选的 `raw_text` 会拼入「分类（已爆/连升）/ 榜内排名 / 热度」三项信号——「分类」直接喂给 R3（已爆→饱和/衰退期、连升→上升期），让 4R 对趋势差异敏感；
+  - **热度预筛**：按候选 `raw_text` 中「热度: ...」字段降序取 Top `scoring_pool_size` 条（默认 `max(top_k × 3, 15)`）进入 LLM 打分，避免全量调用；
   - 并发调用 4R 打分，使用 `BrandTopicRules` 中 Step 4 生成的品牌专属 prompt（经 `extract_scoring_sections` 截断后的三段）作为评分依据；
   - 按总分 + R4 tie-break 降序取 Top K（默认 5，可配置/可 CLI 覆盖），写入 `TopicSelection` 表并打上「适用品牌」字段；
-  - 去重：按 (回溯窗口, 品牌, 话题名称) 三元组跳过已存在条目（v5.9.0 起去重窗口与候选窗口对齐,不再仅查当日），保证同窗口内多次运行幂等；
+  - 去重：查 TopicSelection 中锚定日 00:00 ~ 次日 00:00 窗口内该品牌已有话题名，已存在跳过，保证同一锚定日重复跑幂等；
   - **本步骤不再触碰文案/产品匹配/封面/视频**，这些全部交给第六步 `generate_brand_content`。
 
 - **品牌内容矩阵与 Top K 视觉资产（generate_brand_content，第六步）**
@@ -251,6 +277,8 @@ python3 user_skills/brand-content-marketing-advisor/main.py run_all --brand "品
 
 执行 Step 1→6 全链路，每步完成发飞书卡片通知。单步失败不中断后续步骤。
 
+> **自动 schema 对齐**：`run_all` 在写入权限预检通过后、事务执行前，会自动调用 `sync_all_schemas` 对 5 张托管表（brands 硬跳过）做字段对齐——只创建 config 已登记但 Bitable 缺失的列，记录数 < 3 时跳过空列删除阶段。这是兑现"首次运行自动建表 + 无手工前置"承诺的关键一步，避免 v5.10.0 这类新增字段（`上市年月` / `官方来源链接` / `产品生命周期`）在旧 base 上写入时报 `FieldNameNotFound` 导致 Step 3 全败、Step 6 跨品牌捞 SKU。
+
 ### Step 1. 初始化品牌基础信息（init_brand）
 
 判断品牌在 `Brands` 表是否存在，不存在则用 LLM 生成 7 维度并写入；存在但部分维度为空则自动补齐。返回该品牌完整的 7 维度信息供后续步骤使用。
@@ -295,6 +323,16 @@ python3 user_skills/brand-content-marketing-advisor/main.py init_audience --bran
 python3 user_skills/brand-content-marketing-advisor/main.py init_products --brand "Moose Knuckles"
 ```
 
+**产品矩阵硬约束（v5.10.0）**：
+
+1. **产品必须真实存在**：只列品牌当前在官网 / 天猫旗舰店 / 京东自营 / 小红书官方店实际在售或最近一年内售卖过的 SKU。LLM prompt 里显式禁止虚构；每条产品必须附 `source_url`（权威链接优先级：品牌官网 > 天猫旗舰店 > 京东自营 > 小红书官方店），缺链接的记录在写入前被 `_step3_populate_products` 过滤掉，**不会落地到 Products 表**。
+2. **生命周期配比**：必须同时覆盖「新品」（近 12 个月内上市，至少 2 款）和「经典爆品」（销售多年 / 年销 10w+ / 官方复刻的招牌 SKU，至少 2 款）；其余可以是「常规款」。`lifecycle_stage` 字段枚举值只能是 `新品 / 经典爆品 / 常规款`。
+3. **下游选品机制**：第六步 `generate_brand_content` 调用 `select_top_products` 时,Top-K ≥ 2 的情况下会**强制保证至少 1 款新品 + 1 款经典爆品**（前提是候选池里两类都存在）,其余按 4R+人群匹配得分补齐。评分函数还会对「经典爆品 +8 / 新品 +6」做小幅加成,兼顾安全盘和话题感。
+4. **新增字段**（schema_sync 会自动建列,无需手工建表）：
+   - `产品生命周期` — 新品 / 经典爆品 / 常规款
+   - `上市年月` — YYYY 或 YYYY-MM 文本
+   - `官方来源链接` — https:// 开头的可验证 URL
+
 ### Step 4. 生成品牌 4R 策略（init_topic_rules）
 
 使用内置骨架模板，由 LLM 基于 Brand 表 + 品牌人群表内容填充所有槽位，严格校验后 upsert 写入 `BrandTopicRules` 表。**自动加载 Step 1 + Step 2 依赖**。
@@ -305,9 +343,9 @@ python3 user_skills/brand-content-marketing-advisor/main.py init_topic_rules --b
 
 ### Step 5. 每日精选话题筛选（select_topic）
 
-跨 base 从「每日精选话题」表读取**北京时间回溯窗口**内（由 `daily_topics.lookback_days` 控制，默认 **10 天，含锚定日**）的候选话题，按热度预筛后使用 `BrandTopicRules` 中该品牌的 4R prompt 打分，按总分降序取 Top K 写入 `TopicSelection` 表。**本步骤不生成任何文案/封面/视频**，只负责筛选。
+跨 base 从 `hot-topic-insight` 技能的 snapshot 表读取**单日候选话题**（默认锚定日 = 北京时间 T-1，该日无数据自动往前回退最多 `daily_topics.max_rollback_days` 天），按热度预筛后使用 `BrandTopicRules` 中该品牌的 4R prompt 打分，按总分降序取 Top K 写入 `TopicSelection` 表。**本步骤不生成任何文案/封面/视频**，只负责筛选。
 
-**前置条件：** 配置 `daily_topics` 段并已跑过 Step 1~4（保证 `BrandTopicRules` 中存在该品牌的 4R prompt，否则会回落通用 prompt 并打 warning）。
+**前置条件：** 配置 `daily_topics` 段（指向 hot-topic-insight 的 app_token / table_id）并已跑过 Step 1~4（保证 `BrandTopicRules` 中存在该品牌的 4R prompt，否则会回落通用 prompt 并打 warning）。
 
 **命令格式：**
 
@@ -317,35 +355,38 @@ python3 user_skills/brand-content-marketing-advisor/main.py select_topic --brand
 
 - `--brand`：必填，品牌名称（须与 `BrandTopicRules` 中记录一致）。
 - `--top-k`：可选，Top K 数量；默认读 `daily_topics.top_k`（默认 5）。
-- `--date`：可选，锚定日期 `YYYY-MM-DD`（窗口截止日，含）；实际回溯窗口为 `[锚定日 − (lookback_days − 1), 锚定日 + 1 天)`。默认锚定北京时间当日。
+- `--date`：可选，锚定日期 `YYYY-MM-DD`。**该日若无数据会自动往前回退**最多 `max_rollback_days` 天找最近一天有数据的日期。默认锚定日 = 北京时间 T-1。
 
 **执行流程：**
 
-1. 计算回溯时间窗口（北京时间，默认最近 10 天含锚定日 = `[锚定日 − 9 天 00:00, 锚定日 + 1 天 00:00)`，由 `daily_topics.lookback_days` 控制）。
+1. 计算锚定日提示（北京时间 T-1，或 `--date` 指定）。
 2. 从 `BrandTopicRules` 加载该品牌专属 4R prompt（自动截断「反漏斗/输出格式」章节）。
-3. 从 `daily_topics.app_token` / `table_id` 跨 base 读取回溯窗口内候选话题（字段映射见 `daily_topics.fields`）。
-4. **热度预筛**：从候选话题 `raw_text` 中提取「今日热度」字段，按热度降序取前 `scoring_pool_size` 条进入 LLM 打分（默认 `max(top_k × 3, 15)`，由 `daily_topics.scoring_pool_size` 覆盖），避免对所有候选话题都调 LLM。
-5. 并发调用 `compute_4r_score_with_model`，线程数走 `concurrency.max_workers`。
-6. 按总分 + R4 tie-break 降序取 Top K。
-7. **去重**：查 `TopicSelection` 中**回溯窗口内**该品牌已有话题名做幂等去重（v5.9.0 起去重窗口与候选窗口对齐，不再仅查当日），写入剩余 Top K 并打上「适用品牌」字段。
+3. 从 `daily_topics.app_token` / `table_id` 跨 base 读取全量 snapshot 记录，挑出 ≤ 锚定日提示的最大日期（往前最多回退 `max_rollback_days` 天）作为**真正锚定日**，过滤出该日全部记录（字段映射见 `daily_topics.fields`）。
+4. **热度预筛**：从候选话题 `raw_text` 中提取「热度」字段（由 `_build_raw_text` 拼成 `热度: <数值>`），按降序取前 `scoring_pool_size` 条进入 LLM 打分（默认 `max(top_k × 3, 15)`，由 `daily_topics.scoring_pool_size` 覆盖）。
+5. 每条候选的 `raw_text` 会拼入「分类（已爆/连升）/ 榜内排名 / 热度」，让 4R 的 R3 能识别上升期 vs 衰退期。
+6. 并发调用 `compute_4r_score_with_model`，线程数走 `concurrency.max_workers`。
+7. 按总分 + R4 tie-break 降序取 Top K。
+8. **去重**：查 `TopicSelection` 中**真正锚定日的 24 小时窗口**内该品牌已有话题名做幂等去重，写入剩余 Top K 并打上「适用品牌」字段。
 
 **示例：**
 
 ```bash
-# 为「加拿大鹅」筛选最近 10 天 Top 5 每日精选话题（锚定今日）
+# 默认锚定 T-1（今天=4/20 → 读 4/19 的 100 条抖音双榜话题）
 python3 user_skills/brand-content-marketing-advisor/main.py select_topic --brand "加拿大鹅"
 
-# 锚定指定日期筛选 Top 3（窗口 = 最近 10 天，截至 2026-04-11）
+# 指定锚定日；若 4/11 当天无数据，自动回退到 4/10 / 4/09 …
 python3 user_skills/brand-content-marketing-advisor/main.py select_topic --brand "加拿大鹅" --date 2026-04-11 --top-k 3
 ```
 
-执行成功后在 stdout 输出 JSON 摘要（字段 `daily_topics_total` 表示预筛后进入打分的候选数）：
+执行成功后在 stdout 输出 JSON 摘要（`date` = 真正命中的日期；`rollback_triggered` 标识是否触发了 T-1 回退）：
 
 ```json
 {
   "brand": "加拿大鹅",
-  "date": "2026-04-12",
-  "lookback_days": 10,
+  "date": "2026-04-19",
+  "anchor_hint": "2026-04-19",
+  "max_rollback_days": 14,
+  "rollback_triggered": false,
   "daily_topics_total": 15,
   "scored_count": 15,
   "top_k": 5,

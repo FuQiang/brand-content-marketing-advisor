@@ -544,17 +544,27 @@ _STEP3_PROMPT = """\
 - 典型人群：{audience}
 - 画像标签：{persona_tags}
 
-## 硬性要求
-1. 所有产品的 price_band 必须落在「品类与价格带」声明的区间内
-2. 所有产品的 selling_point / selling_point_detail 必须紧扣「核心差异化」
-3. 所有产品的 functions / season 必须服务于「高价值场景」中至少一个场景
-4. 产品 persona_tags 必须与目标人群画像对齐
+## 硬性要求（不满足就不要返回该条）
+1. **产品必须真实存在，严禁虚构**。只列 {brand} 当前在官网 / 天猫旗舰店 / 京东自营 / 小红书官方店实际在售或最近一年内售卖过的 SKU；你**不确定是否真实**时直接跳过，不要编造。
+2. 每款产品必须附带 `source_url` —— 一条可以验证该 SKU 真实性的权威链接（优先顺序：品牌官网产品详情页 > 天猫旗舰店 > 京东自营 > 小红书品牌号/官方店）。没有链接就不要返回这条。
+3. 产品矩阵必须同时覆盖两类 `lifecycle_stage`：
+   - **新品**：近 12 个月内首次上市的 SKU —— 至少 2 款
+   - **经典爆品**：销售多年或年销量长期领先的招牌 SKU（长尾复购 / 年销 10w+ / 官方多次复刻）—— 至少 2 款
+   - 其余可以是 **常规款**
+4. `launch_date` 必填，格式 `YYYY` 或 `YYYY-MM`（尽可能具体；不知道则用该产品官方公布的首发年份）。
+5. 所有产品的 price_band 必须落在「品类与价格带」声明的区间内
+6. 所有产品的 selling_point / selling_point_detail 必须紧扣「核心差异化」
+7. 所有产品的 functions / season 必须服务于「高价值场景」中至少一个场景
+8. 产品 persona_tags 必须与目标人群画像对齐
 
 ## 返回格式（严格 JSON 数组，不要加包裹或注释）
 [
   {{
     "series": "产品系列名称",
-    "name": "具体产品名称（中文+英文）",
+    "name": "具体产品名称（中文+英文，和官方命名保持一致）",
+    "lifecycle_stage": "新品" | "经典爆品" | "常规款",
+    "launch_date": "YYYY 或 YYYY-MM",
+    "source_url": "https://...（可以公开访问验证该 SKU 真实性的链接）",
     "selling_point": "一句话核心卖点（20 字以内）",
     "selling_point_detail": "详细卖点阐述（50-100 字，引用核心差异化）",
     "persona_tags": ["目标人群标签1", "目标人群标签2"],
@@ -567,10 +577,17 @@ _STEP3_PROMPT = """\
 ]
 
 ## 枚举约束
+- lifecycle_stage 只能是：新品 / 经典爆品 / 常规款
 - persona_tags 只能从以下选项中多选：新锐白领、精致妈妈、学生党、资深打工人、户外玩家、品质中产、潮流青年
 - season 只能是：春、夏、秋、冬、四季通用
 - price_band 只能是：入门、中端、高端、旗舰、奢华
 - functions 只能从以下选项中多选：极致保暖、轻量通勤、防风防水、城市户外、防雨防污、可机洗、高强度抗皱
+
+## 自检
+返回前复查：
+- 有没有我自己记不清到底存在不存在的 SKU？有 → 删掉。
+- `lifecycle_stage=新品` 至少 2 款？`经典爆品` 至少 2 款？不足 → 补齐或不要返回（不要用"常规款"凑数假装新品 / 爆品）。
+- 每条都有 `source_url` 吗？没 → 删掉。
 
 不要返回 JSON 之外的任何内容。
 """
@@ -647,6 +664,17 @@ def _step3_populate_products(
         if isinstance(function_list, str):
             function_list = [x.strip() for x in function_list.split(",") if x.strip()]
 
+        # 真实性验证：没有 source_url 的记录直接跳过,不落地"查无此品"的虚构 SKU
+        source_url = str(p.get("source_url", "")).strip()
+        if not source_url or not source_url.lower().startswith(("http://", "https://")):
+            logger.warning("产品 '%s' 缺少官方来源链接,跳过（防虚构）", name)
+            skipped_count += 1
+            continue
+
+        lifecycle = str(p.get("lifecycle_stage", "")).strip()
+        if lifecycle not in ("新品", "经典爆品", "常规款"):
+            lifecycle = "常规款"
+
         fields_to_write = {
             f["brand"]: brand,
             f["series"]: str(p.get("series", "")),
@@ -659,19 +687,34 @@ def _step3_populate_products(
             f["price_band"]: str(p.get("price_band", "")),
             f["material"]: str(p.get("material", "")),
             f["functions"]: function_list,
+            f["lifecycle_stage"]: lifecycle,
+            f["launch_date"]: str(p.get("launch_date", "")).strip(),
+            f["source_url"]: source_url,
         }
 
         try:
-            tx_add_single(app_token, tbl_id, fields_to_write, tx=tx)
-            created_count += 1
-            existing_names.add(name)
-            created_products.append({
-                "name": name,
-                "series": str(p.get("series", "")),
-                "selling_point": str(p.get("selling_point", "")),
-            })
+            record_id = tx_add_single(app_token, tbl_id, fields_to_write, tx=tx)
         except Exception as e:
             logger.warning("创建产品记录失败 name='%s': %s", name, e)
+            skipped_count += 1
+            continue
+        if not record_id:
+            # `add_single` 内部会把 Bitable 的 FieldNameNotFound / 权限等错误 catch
+            # 成 WARNING + 返回 None——这里必须显式识别，否则 created_count 会虚涨，
+            # 让 Step 6 误以为产品池非空、跨品牌捞别家 SKU 做文案。
+            logger.warning(
+                "产品 '%s' 写入 Bitable 失败（见上方 bcma.bitable WARNING），跳过",
+                name,
+            )
+            skipped_count += 1
+            continue
+        created_count += 1
+        existing_names.add(name)
+        created_products.append({
+            "name": name,
+            "series": str(p.get("series", "")),
+            "selling_point": str(p.get("selling_point", "")),
+        })
 
     # 补全产品图库
     try:
