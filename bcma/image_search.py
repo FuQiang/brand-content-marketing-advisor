@@ -272,3 +272,41 @@ def search_real_product_images(query: str, num: int, download_dir: str) -> List[
             logger.warning("[image_search] 兜底 Bing 异常: %s", e)
 
     return [os.path.abspath(p) for p in paths[:num]]
+
+
+def _cli_main() -> int:
+    """CLI 入口。SKILL.md 通过 Bash 调用本模块补全 Step 3 产品图库。
+
+    示例:
+        python3 bcma/image_search.py --query "双汇 玉米热狗肠 官方产品图" --num 3 --out /tmp/bcma_imgs/
+
+    成功时把本地文件绝对路径逐行写到 stdout;失败时返回非零退出码.
+    """
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="真实产品图搜索(DuckDuckGo + Bing,无 API Key)")
+    parser.add_argument("--query", required=True, help="搜索关键词,建议 品牌+产品名+官方产品图")
+    parser.add_argument("--num", type=int, default=3, help="目标图片数量(默认 3)")
+    parser.add_argument("--out", required=True, help="下载到的本地目录(自动创建)")
+
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+    paths = search_real_product_images(args.query, args.num, args.out)
+    if not paths:
+        print(f"image_search 未返回任何图片 query={args.query!r}", file=sys.stderr)
+        return 2
+    for p in paths:
+        print(p)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_cli_main())

@@ -1,4 +1,14 @@
 
+# v6.0.0
+- **refactor(Architecture)**: 彻底抛弃 Python 业务胶水,改为 **SKILL.md-driven 主剧本 + references/ 执行手册**。6 步流水线(品牌 7 维 → 人群 → 产品 → 4R 策略 → 每日选题 → 双平台内容)由 Claude Agent 按 SKILL.md 直接编排,所有数据读写走 `feishu_bitable_*` / `feishu_drive_*` 官方 MCP 工具,不再经 `bcma.bitable` / `bcma.llm_client` / `bcma.brand_pipeline` 等 Python 中间层。
+- **refactor(LLM)**: 所有 LLM 调用由 Claude Agent 直接完成,删除 `bcma/llm_client.py` 及 Anthropic → AIME → 豆包 的多层降级。prompts、4R rubric、产品真实性红线、双平台文案模板全部从 Python 抽出,落到 `references/step-{1..6}-*.md` 与 `references/bitable-write-shapes.md` / `references/cross-base-topics.md` 8 份执行手册。
+- **refactor(Config)**: `config.yaml` 删除 `concurrency` / `model` 两段(v5.x 仅供旧 main.py 兼容),只保留 `app.app_token` / `tables.*` / `fields.*` / `scoring.{threshold_main,threshold_candidate,r4_veto_threshold}` / `regex_filters` / `downstream.*` / `daily_topics.*`。
+- **remove(Python Glue)**: 删除 `main.py` / `backfill_assets.py` / `config.yaml.template` / `test_topics.csv`,以及 `bcma/` 下 `authorize.py` / `bitable*.py` / `brand_pipeline.py` / `brand_setup.py` / `card_sender.py` / `config.py` / `copywriting.py` / `daily_topics.py` / `downstream.py` / `llm_client.py` / `product_assets.py` / `schema_sync.py` / `scoring.py` / `tx.py` / `upstream.py` / `utils.py` / `__init__.py`。
+- **keep(Leaf CLIs)**: `bcma/` 仅保留两个叶子工具 —— `dreamina_cli.py`(dreamina CLI 适配层,Step 3 图库/Step 6 封面+视频)与 `image_search.py`(DuckDuckGo + Bing 图片搜索,Step 3 真实产品图),均由 SKILL.md 通过 Bash 调用,不参与 Claude 会话编排。
+- **feat(Auto-Auth)**: 飞书授权全量交给 openclaw-lark auto-auth —— 首次调用缺 scope 时自动弹 OAuth 卡片,只申请本次调用所需 scope(如 `base:record:create`),用户点同意后续运行零打扰。删除 v5.x 的 `bcma/authorize.py` 显式批量授权流程。**不申请** `im:message.send_as_user` 等敏感 scope —— 阶段性产出文本由 Agent 直接输出,openclaw 层用 bot 身份 reply 回触发会话。
+- **feat(Silent Execution)**: 触发后 6 步跑到底,中途不请示。每步完成在 Agent 文本输出里写一小段 `emoji + Step X/6 完成 · ...` 阶段性产出;失败才额外输出 `❌ Step X/6 失败` 摘要 + 下一步建议。数据只进多维表格,不写 `workspace/*.md` / `workspace/*.json`。
+- **docs(SKILL.md)**: 从 v5.7.0 的 description + 技术栈清单 → v6.0.0 的完整 6 步主剧本 + 触发条件 + 执行原则 + 阶段性产出模板 + 错误处理表 + 授权说明 + 保留 CLI 说明。
+
 # v5.7.0
 - **feat(Schema Sync Module)**: 新增 `bcma/schema_sync.py` 模块，提供对 Skill 托管表的**可重入、幂等、安全**的结构对齐能力：
   - `sync_table_schema(cfg, table_key)` — 单表同步：基于 `config.fields[table]` 登记映射与 `list_table_fields` 做 diff，对缺失字段按 `_infer_field_type` 推断 (type_code, ui_type) 调 `ensure_field_exists` 创建；对未登记且整列全空的非保护列走 `delete_field_if_exists` 清理。

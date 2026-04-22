@@ -251,3 +251,67 @@ def text2video(
     ]
     paths = _run_and_collect(cmd, download_dir, poll_seconds, collect_all=False)
     return paths[0] if paths else None
+
+
+def _cli_main() -> int:
+    """CLI 入口。SKILL.md 通过 Bash 调用本模块生成封面/视频。
+
+    示例:
+        python3 bcma/dreamina_cli.py text2image --prompt="..." --ratio=9:16
+        python3 bcma/dreamina_cli.py image2image --base-image=/tmp/x.png --prompt="..." --ratio=3:4
+        python3 bcma/dreamina_cli.py text2video --prompt="..." --duration=5
+
+    成功时把本地文件绝对路径写到 stdout(最后一行);失败时非零退出码 + stderr 报错.
+    """
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="dreamina CLI 适配器")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_t2i = sub.add_parser("text2image", help="Text-to-image")
+    p_t2i.add_argument("--prompt", required=True)
+    p_t2i.add_argument("--ratio", default="9:16")
+    p_t2i.add_argument("--resolution", default="2k")
+    p_t2i.add_argument("--poll", type=int, default=120)
+
+    p_i2i = sub.add_parser("image2image", help="Image-to-image (底图缺失自动退 text2image)")
+    p_i2i.add_argument("--base-image", dest="base_image", default=None)
+    p_i2i.add_argument("--prompt", required=True)
+    p_i2i.add_argument("--ratio", default="9:16")
+    p_i2i.add_argument("--resolution", default="2k")
+    p_i2i.add_argument("--poll", type=int, default=120)
+
+    p_t2v = sub.add_parser("text2video", help="Text-to-video")
+    p_t2v.add_argument("--prompt", required=True)
+    p_t2v.add_argument("--duration", type=int, default=5)
+    p_t2v.add_argument("--ratio", default="9:16")
+    p_t2v.add_argument("--model-version", dest="model_version", default="seedance2.0_vip")
+    p_t2v.add_argument("--poll", type=int, default=180)
+
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+    path: Optional[str] = None
+    if args.cmd == "text2image":
+        path = text2image(args.prompt, ratio=args.ratio, resolution=args.resolution, poll_seconds=args.poll)
+    elif args.cmd == "image2image":
+        path = image2image(args.base_image, args.prompt, ratio=args.ratio, resolution=args.resolution, poll_seconds=args.poll)
+    elif args.cmd == "text2video":
+        path = text2video(args.prompt, duration=args.duration, ratio=args.ratio, model_version=args.model_version, poll_seconds=args.poll)
+
+    if path and os.path.isfile(path):
+        print(path)
+        return 0
+    print("dreamina CLI 失败: 未返回有效本地文件", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_cli_main())
