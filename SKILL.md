@@ -48,8 +48,21 @@ visibility: A
 
 **首次运行(app_token 空)**:
 - 用 `feishu_bitable_app.create` 新建 base,把返回的 app_token 回写 config.yaml 的 `app.app_token`
-- 用 `feishu_bitable_app_table.batch_create` 批量建 6 张表(表名和字段从 config.yaml 的 fields 映射推断,附件字段用 ui_type=Attachment、多选用 MultiSelect、数字用 Number 等)
+- 用 `feishu_bitable_app_table.batch_create` **一次性**建 6 张表,每张表的 `fields` 数组在**同一次调用**里传完。附件字段用 ui_type=Attachment、多选用 MultiSelect、数字用 Number 等
 - 把 table_id 回写 config.yaml 的 `tables.*.table_id`
+
+⚠️ **索引列红线**(踩过坑):Bitable 每张表的第一列是索引列(primary field),由 `batch_create` 里 `fields` 数组的**首个元素**决定。以下 6 个字段必须作为各自表的 `fields[0]` 传入,类型一律 `type=1` (Text):
+
+| 表 | `fields[0]` 必须是 |
+|---|---|
+| brands | 品牌名称 |
+| brand_audience | 品牌名称 |
+| products | 所属品牌 |
+| brand_topic_rules | 品牌名称 |
+| topic_selection | 话题名称 |
+| content_matrix | 匹配话题 |
+
+**禁止的写法**:先 `batch_create` 只传 name 不传 fields、再逐个 `app_table_field.create` 补字段 —— 这会让 Bitable 自动生成一个空白"文本"索引列,你后补的字段全部追加在它之后,每张子表第一列都变成空白。一旦出现这种情况,索引列不可删除,只能 `app_table_field.update` 把它 rename 成目标 primary 字段名再把原字段删掉。
 
 ---
 
