@@ -1,0 +1,186 @@
+# brand-content-marketing-advisor · 配置示例
+#
+# 使用方式:
+#   cp config.yaml.example config.yaml
+#   然后:
+#     方式 A (推荐) — 首次运行 Skill 会自动建 base + 6 张表,并把 app_token / table_id
+#                    回写到 config.yaml,无需手动填写。保持 app_token 为空即可。
+#     方式 B        — 如果你已经手工创建好了 base,把 app_token 和 6 个 table_id
+#                    填进来,Skill 会直接复用。
+#
+# config.yaml 已被 .gitignore 排除,不会入库。
+
+app:
+  # Bitable base 的 app_token。留空 → 首次运行自动创建并回写。
+  # 也可通过环境变量 BCMA_APP_TOKEN 覆盖(环境变量优先)。
+  app_token: ""
+
+tables:
+  # 6 张业务表的 table_id。留空 → 首次运行自动建表并回写。
+  brands:
+    table_id: ""
+  brand_audience:
+    table_id: ""
+  products:
+    table_id: ""
+  brand_topic_rules:
+    table_id: ""
+  topic_selection:
+    table_id: ""
+  content_matrix:
+    table_id: ""
+
+fields:
+  # Brand 表:品牌基础信息(7 个维度,由用户手工维护或 Step 1 LLM 自动生成)
+  brands:
+    name: "品牌名称"
+    category_price: "品类与价格带"
+    differentiation: "核心差异化"
+    competitors: "最大竞品"
+    excluded_audience: "排斥人群"
+    compatible_persona: "适配人设/美学"
+    conflict_persona: "冲突人设/美学"
+    high_value_scenes: "高价值场景"
+  # 品牌人群表:基于 Brand 表 LLM 生成,所有字段不能为空
+  brand_audience:
+    name: "品牌名称"
+    audience: "典型人群受众"
+    persona_tags: "画像标签"
+    motivation: "消费动机"
+    content_preference: "内容偏好"
+    persona_description: "人群描述"
+  products:
+    brand: "所属品牌"
+    series: "产品系列"
+    name: "产品名称"
+    selling_point: "产品卖点"
+    selling_point_detail: "卖点详细阐述"
+    persona_tags: "目标人群标签"
+    pain_points: "人群痛点"
+    season: "季节"
+    price_band: "价格带"
+    material: "材质"
+    functions: "功能点"
+    base_weight: "基础权重"
+    lifecycle_stage: "产品生命周期"   # 新品 / 经典爆品 / 常规款
+    launch_date: "上市年月"            # 文本,格式 YYYY 或 YYYY-MM
+    source_url: "官方来源链接"         # 品牌官网 / 天猫旗舰店 / 京东自营 URL,用于证伪
+    asset_gallery_field: "产品图库(真实大片)"
+    non_removable_fields:
+      - "所属品牌"
+      - "产品名称"
+      - "产品系列"
+      - "产品卖点"
+      - "目标人群标签"
+      - "功能点"
+      - "季节"
+      - "产品生命周期"
+      - "官方来源链接"
+      - "产品图库(真实大片)"
+  brand_topic_rules:
+    name: "品牌名称"
+    rules_prompt: "话题筛选及评估逻辑"
+  topic_selection:
+    topic: "话题名称"
+    brand: "适用品牌"
+    audience: "适用人群"
+    r1: "R1 相关度"
+    r2: "R2 场景力"
+    r3: "R3 流量趋势"
+    r4: "R4 舆情风险"
+    total_score: "总分"
+    decision: "决策结果"
+    one_line_reason: "一句话理由"
+    content_direction: "内容方向建议"
+    created_at: "入库时间"
+    source: "来源"
+    fetched_at: "抓取时间"
+    rule_hits: "规则命中说明"
+    raw_text: "原始文本"
+  content_matrix:
+    topic: "匹配话题"
+    brand: "适用品牌"
+    audience: "目标人群"
+    products: "主推产品"
+    platforms: "适用平台"
+    # 通用字段(向后兼容)
+    hook: "爆款标题/钩子"
+    body: "正文与脚本"
+    visuals: "视觉画面建议"
+    logic_breakdown: "爆款逻辑拆解(为什么会火)"
+    # 双平台字段:抖音短视频
+    douyin_script: "抖音短视频脚本"
+    douyin_cover: "抖音封面(9:16)"
+    # 双平台字段:小红书种草笔记
+    xhs_title: "小红书标题"
+    xhs_note: "小红书种草笔记"
+    xhs_cover: "小红书封面(3:4)"
+    # 视频素材(两个平台共用一条 9:16 AI 视频)
+    cover_image_ai_field: "视频封面(AI生成)"
+    video_asset_ai: "视频素材(AI生成)"
+    generated_at: "生成时间"
+    source_topic_id: "来源话题ID"
+    idempotent_key: "幂等键"
+
+scoring:
+  # 4R 打分基于品牌专属 prompt (BrandTopicRules 表),以下为兜底权重
+  relevance_weight: 0.25
+  resonance_weight: 0.25
+  reach_weight: 0.25
+  revenue_weight: 0.25
+  # 决策阈值:总分 >= 16 且 R4 >= 4 → 主推;13-15 且 R4 >= 3 → 备选
+  threshold_main: 16
+  threshold_candidate: 13
+  # R4 安全阈值:R4 <= 此值时无论总分多高一律 PASS
+  r4_veto_threshold: 2
+
+regex_filters:
+  blacklist_patterns:
+    - "政治"
+    - "赌博"
+    - "违法"
+  whitelist_patterns: []
+  allow_patterns: []
+
+downstream:
+  default_platforms:
+    - "小红书"
+    - "抖音"
+  max_products_per_topic: 2
+  # 10 天 = 240 小时,与 daily_topics.lookback_days 对齐,避免 Step5 写完后过 48h Step6 读不到
+  brand_topic_lookback_hours: 240
+  brand_top_k_assets: 5
+
+# 第五步:每日精选话题筛选数据源(跨 base 读取)
+# 数据源:hot-topic-insight 技能每天 04:00 写入的 snapshot 表(抖音双榜合计 100 条)
+# 字段:日期 / 平台 / 榜单来源 / 分类 / 条目类型 / 排名 / 话题 / 热度 / 来源链接
+# 选取策略:锚定日默认 = 北京时间 T-1。若该日无数据,向前回退(最多 max_rollback_days 天)
+# 到最近一天有数据为止。只取该锚定日当天的记录进入 4R 打分。
+daily_topics:
+  # hot-topic-insight base 的 app_token(与 BCMA_APP_TOKEN 不同)。
+  # 留空 → 未接入 hot-topic-insight,Step 5 会报错并跳过。
+  app_token: ""
+  table_id: ""
+  view_id: ""
+  # 时区(北京时间 UTC+8),用于默认锚定日计算
+  timezone_offset_hours: 8
+  # Top K:一次性取前 K 条高分话题写入 TopicSelection
+  top_k: 5
+  # T-1 无数据时最多往前回退的天数(避免死循环)。默认 14 天覆盖两周断档。
+  max_rollback_days: 14
+  # 字段映射(映射到 hot-topic-insight snapshot 表)
+  fields:
+    topic: "话题"
+    source: "平台"
+    created_at: "日期"
+    fetched_at: "日期"
+    raw_text: ""
+    # ---- 扩展字段(拼进 raw_text 供 4R 打分)----
+    category: "分类"
+    rank: "排名"
+    heat: "热度"
+    content_direction: ""
+    suggested_action: ""
+    target_audience: ""
+    heat_delta: ""
+    rising_days: ""
